@@ -75,7 +75,7 @@ def clean(ar, args, arch):
     data = np.reshape(data, (-1, orig_shape[2]))
 
     # Compute the pca
-    pca = PCA(n_components=args.components, svd_solver="full")
+    pca = PCA(n_components=pca_components, svd_solver="full")
     data_pca = pca.fit_transform(data)
 
     # Compute the anomaly scores of the isolation forest algorithm
