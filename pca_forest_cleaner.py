@@ -17,7 +17,7 @@ from sklearn.ensemble import IsolationForest
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Commands for the cleaner')
     parser.add_argument('archive', nargs='+', help='The chosen archives')
-    parser.add_argument('-n', '--components', type=int, default=1024, help='Number of pca components.')
+    parser.add_argument('-n', '--components', type=int, default=256, help='Number of pca components.')
     parser.add_argument('-e', '--estimators', type=int, default=100, help='Number of tree estimators.')
     parser.add_argument('-s', '--samples', type=float, default=1.0, help='Fraction of samples that trains each estimators.\
         If 1.0 all samples are used')
@@ -63,9 +63,11 @@ def clean(ar, args, arch):
     # Grab the profiles after dedispersing them
     data = patient.get_data()[:, 0, :, :]
     profile_number = data[:, :, 0].size
+    pca_components = min(args.components, data.shape[2])
 
     if args.verbose:
-        print ("PCA parameters: n_components: %s" % args.components)
+        print ("Number of Profiles: %s" % profile_number)
+        print ("PCA parameters: n_components: %s" % pca_components)
         print ("IsolationForest parameters: n_estimators: %s max_samples: %s" % (args.estimators, args.samples))
 
     orig_shape = np.shape(data)
@@ -73,7 +75,7 @@ def clean(ar, args, arch):
     data = np.reshape(data, (-1, orig_shape[2]))
 
     # Compute the pca
-    pca = PCA(n_components=args.components, svd_solver="full")
+    pca = PCA(n_components=pca_components, svd_solver="full")
     data_pca = pca.fit_transform(data)
 
     # Compute the anomaly scores of the isolation forest algorithm
