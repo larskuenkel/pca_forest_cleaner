@@ -21,6 +21,7 @@ def parse_arguments():
     parser.add_argument('-e', '--estimators', type=int, default=100, help='Number of tree estimators.')
     parser.add_argument('-s', '--samples', type=float, default=1.0, help='Fraction of samples that trains each estimators.\
         If 1.0 all samples are used')
+    parser.add_argument('-f', '--features', action='store_true', help='Add additional feature to the pca features (std, mean, ptp).')
     parser.add_argument('-z', '--print_zap', action='store_true', help='Creates a plot that shows which profiles get zapped.')
     parser.add_argument('-v', '--verbose', action='store_false', help='Reduces the verbosity of the program.')
     parser.add_argument('-o', '--output', type=str, default='',
@@ -78,16 +79,25 @@ def clean(ar, args, arch):
     pca = PCA(n_components=pca_components, svd_solver="full")
     data_pca = pca.fit_transform(data)
 
+    # Compute additional features if wanted
+    if args.features:
+        array_std = np.std(data, axis=1)
+        array_mean = np.mean(data, axis=1)
+        array_ptp = np.ptp(data, axis=1)
+        array_feat = np.stack((array_std, array_mean, array_ptp), axis=-1)
+        data_features = np.concatenate((data_pca, array_feat), axis =1)
+    else:
+        data_features = data_pca
+
+
     # Compute the anomaly scores of the isolation forest algorithm
     # The random_state creates a reproducible result but this may not be the best solution in the future
     clf = IsolationForest(n_estimators=args.estimators, max_samples=args.samples, n_jobs=2, random_state=1)
 
-    clf.fit(data_pca)
+    clf.fit(data_features)
 
-    anomaly_factors = clf.decision_function(data_pca)
+    anomaly_factors = clf.decision_function(data_features)
     anomaly_factors_reshape = np.reshape(anomaly_factors, orig_shape[0:2])
-    # plt.plot(np.sort(anomaly_factors))
-    # plt.show()
 
     snrs = []
     split_values = []
@@ -111,6 +121,15 @@ def clean(ar, args, arch):
 
     if args.verbose:
         print "Best SNR: %.1f RFI fraction: %.2f" % (best_snr, best_frac * 0.01)
+
+
+    # Show snr evolution for different split values
+    # x_vals_a = np.linspace(0, 100, num= len(anomaly_factors))
+    # x_vals_b = np.linspace(np.min(rfi_fracs), np.max(rfi_fracs), num= len(snrs))
+    # plt.plot(x_vals_a, np.sort(anomaly_factors)/np.max(anomaly_factors))
+    # plt.plot(x_vals_b, snrs/np.max(snrs))
+    # plt.show()
+
 
     # Set the weights in the archive
     set_weights_archive(ar, anomaly_factors_reshape, best_split_value)
