@@ -22,6 +22,7 @@ def parse_arguments():
     parser.add_argument('-s', '--samples', type=float, default=1.0, help='Fraction of samples that trains each estimators.\
         If 1.0 all samples are used')
     parser.add_argument('-f', '--features', action='store_true', help='Add additional feature to the pca features (std, mean, ptp).')
+    parser.add_argument('-d', '--disable_pca', action='store_true', help='Do not use pca features, ony use additional features.')
     parser.add_argument('-z', '--print_zap', action='store_true', help='Creates a plot that shows which profiles get zapped.')
     parser.add_argument('-v', '--verbose', action='store_false', help='Reduces the verbosity of the program.')
     parser.add_argument('-o', '--output', type=str, default='',
@@ -67,7 +68,8 @@ def clean(ar, args, arch):
     pca_components = min(args.components, data.shape[2])
 
     if args.verbose:
-        print ("Number of Profiles: %s" % profile_number)
+        if not args.disable_pca:
+            print ("Number of Profiles: %s" % profile_number)
         print ("PCA parameters: n_components: %s" % pca_components)
         print ("IsolationForest parameters: n_estimators: %s max_samples: %s" % (args.estimators, args.samples))
 
@@ -80,14 +82,18 @@ def clean(ar, args, arch):
     data_pca = pca.fit_transform(data)
 
     # Compute additional features if wanted
-    if args.features:
+    if args.features or args.disable_pca:
         array_std = np.std(data, axis=1)
         array_mean = np.mean(data, axis=1)
         array_ptp = np.ptp(data, axis=1)
         array_feat = np.stack((array_std, array_mean, array_ptp), axis=-1)
-        data_features = np.concatenate((data_pca, array_feat), axis =1)
-    else:
+
+    if not args.disable_pca:
         data_features = data_pca
+        if args.features:
+            data_features = np.concatenate((data_features, array_feat), axis =1)
+    else:
+        data_features = array_feat
 
 
     # Compute the anomaly scores of the isolation forest algorithm
@@ -136,7 +142,7 @@ def clean(ar, args, arch):
 
     # Create plot that shows zapped( red) and unzapped( blue) profiles if needed
     if args.print_zap:
-        plt.imshow(anomaly_factors_reshape, vmin=best_split_value, vmax=best_split_value + 0.0001, aspect='auto',
+        plt.imshow(anomaly_factors_reshape.T, vmin=best_split_value, vmax=best_split_value + 0.0001, aspect='auto',
                 interpolation='nearest', cmap=cm.coolwarm)
         plt.gca().invert_yaxis()
         plt.savefig("%s_%s_%s_%s.png" % (ar_name, args.components, args.estimators, args.samples), bbox_inches='tight')
