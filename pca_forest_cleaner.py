@@ -3,6 +3,8 @@
 # Tool to remove RFI from pulsar archives using principal component analysis and the isolation forsest algorithm.
 # Originally written by Lars Kuenkel
 
+from __future__ import print_function
+
 import numpy as np
 import datetime
 import matplotlib.pyplot as plt
@@ -11,6 +13,7 @@ import argparse
 import psrchive
 from sklearn.decomposition import PCA
 from sklearn.ensemble import IsolationForest
+import time
 
 
 
@@ -20,9 +23,18 @@ def parse_arguments():
     parser.add_argument('-n', '--components', type=int, default=256, help='Number of pca components.')
     parser.add_argument('-e', '--estimators', type=int, default=100, help='Number of tree estimators.')
     parser.add_argument('-s', '--samples', type=float, default=1.0, help='Fraction of samples that trains each estimators.\
-        If 1.0 all samples are used')
+        If 1.0 all samples are used.')
+    parser.add_argument('-x', '--max_features', type=float, default=1.0, help='Fraction of features that are used in each estimator.')
     parser.add_argument('-f', '--features', action='store_true', help='Add additional feature to the pca features (std, mean, ptp).')
+    parser.add_argument('-p', '--partition', type=int, default=[1], nargs='+',
+        help='Partitions the profiles into a number of parts for the calculation of the -f parameters\
+                                                                Multiple Values can be used. Default: 1.')
+    parser.add_argument('-m', '--metrics', type=str, default=['std', 'fft', 'mean', 'ptp'], nargs='+', help='Choose which additional features are computed by -f.\
+        Available: mean, fft, std, ptp.')
+    parser.add_argument('-a', '--additional', type=float, default=0.0, help='Remove up to x % profiles than at the point with highest SNR.\
+                                Will lower SNR but might remove RFI profiles.')
     parser.add_argument('-d', '--disable_pca', action='store_true', help='Do not use pca features, ony use additional features.')
+    parser.add_argument('-c', '--contamination_plot', action='store_true', help='Show plot that shows SNR at different contamination levels.')
     parser.add_argument('-z', '--print_zap', action='store_true', help='Creates a plot that shows which profiles get zapped.')
     parser.add_argument('-v', '--verbose', action='store_false', help='Reduces the verbosity of the program.')
     parser.add_argument('-o', '--output', type=str, default='',
@@ -34,7 +46,7 @@ def parse_arguments():
 def main(args):
     for arch in args.archive:
         if args.verbose:
-            print "Input archive: %s" % arch
+            print ("Input archive: %s" % arch)
         ar = psrchive.Archive_load(arch)
         if args.output == '':
             orig_name = str(ar).split(':', 1)[1].strip()
@@ -49,7 +61,7 @@ def main(args):
                 o_name = args.output
         ar = clean(ar, args, arch)
         ar.unload(o_name)
-        print "Cleaned archive: %s" % o_name
+        print ("Cleaned archive: %s" % o_name)
 
 
 def clean(ar, args, arch):
@@ -67,11 +79,12 @@ def clean(ar, args, arch):
     profile_number = data[:, :, 0].size
     pca_components = min(args.components, data.shape[2])
 
+
     if args.verbose:
+        print ("Number of Profiles: %s" % profile_number)
         if not args.disable_pca:
-            print ("Number of Profiles: %s" % profile_number)
-        print ("PCA parameters: n_components: %s" % pca_components)
-        print ("IsolationForest parameters: n_estimators: %s max_samples: %s" % (args.estimators, args.samples))
+            print ("PCA parameters: n_components: %s" % pca_components)
+        print ("IsolationForest parameters: n_estimators: %s max_samples: %s max_features: %s" % (args.estimators, args.samples, args.max_features))
 
     orig_shape = np.shape(data)
     # Reshape the profiles for pca computation
@@ -82,11 +95,27 @@ def clean(ar, args, arch):
     data_pca = pca.fit_transform(data)
 
     # Compute additional features if wanted
+    array_feat = np.array([]).reshape(data.shape[0],0)
+    feat = []
     if args.features or args.disable_pca:
-        array_std = np.std(data, axis=1)
-        array_mean = np.mean(data, axis=1)
-        array_ptp = np.ptp(data, axis=1)
-        array_feat = np.stack((array_std, array_mean, array_ptp), axis=-1)
+        for parts in args.partition:
+            one_part_size = orig_shape[2] / float(parts)
+            for i in range(parts):
+                data_part = data[:, int(i * one_part_size):int((i + 1) * one_part_size)]
+                if 'std' in args.metrics:
+                    array_std = np.std(data_part, axis=1)
+                    feat.append(array_std)
+                if 'mean' in args.metrics:
+                    array_mean = np.mean(data_part, axis=1)
+                    feat.append(array_mean)
+                if 'ptp' in args.metrics:
+                    array_ptp = np.ptp(data_part, axis=1)
+                    feat.append(array_ptp)
+                if 'fft' in args.metrics:
+                    array_fft = np.max(np.abs(np.fft.rfft(data_part - np.expand_dims(np.mean(data_part, axis=1),axis=1), axis=1)),axis=1)
+                    feat.append(array_fft)
+        array_feat = np.asarray(feat).T
+
 
     if not args.disable_pca:
         data_features = data_pca
@@ -95,10 +124,11 @@ def clean(ar, args, arch):
     else:
         data_features = array_feat
 
+    print ("All features: %s" % (data_features.shape[1]))
 
     # Compute the anomaly scores of the isolation forest algorithm
     # The random_state creates a reproducible result but this may not be the best solution in the future
-    clf = IsolationForest(n_estimators=args.estimators, max_samples=args.samples, n_jobs=2, random_state=1)
+    clf = IsolationForest(n_estimators=args.estimators, max_samples=args.samples, max_features=args.max_features, n_jobs=2, random_state=1)
 
     clf.fit(data_features)
 
@@ -109,9 +139,14 @@ def clean(ar, args, arch):
     split_values = []
     rfi_fracs = []
     # Cycle through different rfi fractions and find the best snr
-    for rfi_frac in np.linspace(0, 40, num=100):
+
+    min_frac = 0
+    max_frac = 60
+    num_frac = 120
+
+    for rfi_frac in np.linspace(min_frac, max_frac, num=num_frac):
         split_value = np.percentile(anomaly_factors, rfi_frac)
-        test_profile = np.sum(data[anomaly_factors > split_value, :], axis=0)
+        test_profile = np.sum(data[anomaly_factors >= split_value, :], axis=0)
         profile_object = psrchive.Profile(orig_shape[2])
         profile_object.get_amps()[:] = test_profile
         test_snr = profile_object.snr()
@@ -120,21 +155,22 @@ def clean(ar, args, arch):
         rfi_fracs.append(rfi_frac)
         # print test_snr
 
-    best_index = np.argmax(snrs)
+    best_index = int(np.argmax(snrs) + args.additional*num_frac/max_frac)
     best_snr = snrs[best_index]
     best_frac = rfi_fracs[best_index]
     best_split_value = split_values[best_index]
 
     if args.verbose:
-        print "Best SNR: %.1f RFI fraction: %.2f" % (best_snr, best_frac * 0.01)
+        print ("Best SNR: %.1f RFI fraction: %.4f" % (best_snr, best_frac * 0.01))
 
 
     # Show snr evolution for different split values
-    # x_vals_a = np.linspace(0, 100, num= len(anomaly_factors))
-    # x_vals_b = np.linspace(np.min(rfi_fracs), np.max(rfi_fracs), num= len(snrs))
-    # plt.plot(x_vals_a, np.sort(anomaly_factors)/np.max(anomaly_factors))
-    # plt.plot(x_vals_b, snrs/np.max(snrs))
-    # plt.show()
+    if args.contamination_plot:
+        x_vals_a = np.linspace(0, 100, num= len(anomaly_factors))
+        x_vals_b = np.linspace(np.min(rfi_fracs), np.max(rfi_fracs), num= len(snrs))
+        plt.plot(x_vals_a, np.sort(anomaly_factors)/np.max(anomaly_factors))
+        plt.plot(x_vals_b, snrs/np.max(snrs))
+        plt.show()
 
 
     # Set the weights in the archive
@@ -142,7 +178,7 @@ def clean(ar, args, arch):
 
     # Create plot that shows zapped( red) and unzapped( blue) profiles if needed
     if args.print_zap:
-        plt.imshow(anomaly_factors_reshape.T, vmin=best_split_value, vmax=best_split_value + 0.0001, aspect='auto',
+        plt.imshow(anomaly_factors_reshape.T, vmin=best_split_value - 0.0001, vmax=best_split_value, aspect='auto',
                 interpolation='nearest', cmap=cm.coolwarm)
         plt.gca().invert_yaxis()
         plt.savefig("%s_%s_%s_%s.png" % (ar_name, args.components, args.estimators, args.samples), bbox_inches='tight')
