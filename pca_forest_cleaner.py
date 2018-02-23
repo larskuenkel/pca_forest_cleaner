@@ -40,7 +40,7 @@ def parse_arguments():
     parser.add_argument('-b', '--bandpass', action='store_true', help='Use bandpass correction.')
     parser.add_argument('-v', '--verbose', action='store_false', help='Reduces the verbosity of the program.')
     parser.add_argument('-o', '--output', type=str, default='',
-        help='Name of the output file. If set to 'std' the pattern NAME.FREQ.MJD.ar will be used.')
+        help="Name of the output file. If set to 'std' the pattern NAME.FREQ.MJD.ar will be used.")
     parser.add_argument('-r', '--order', action='store_true', help='Use the computed features in the pca calculation.')
     parser.add_argument('-w', '--weight', action='store_true', help='Do not use profiles which already have weight 0.')
     args = parser.parse_args()
