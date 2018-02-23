@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-# Tool to remove RFI from pulsar archives using principal component analysis and the isolation forsest algorithm.
+# Tool to remove RFI from pulsar archives using principal component analysis and the isolation forest algorithm.
 # Originally written by Lars Kuenkel
 
 from __future__ import print_function
@@ -13,7 +13,8 @@ import argparse
 import psrchive
 from sklearn.decomposition import PCA
 from sklearn.ensemble import IsolationForest
-import time
+from scipy.signal import medfilt
+# import time
 
 
 
@@ -36,9 +37,12 @@ def parse_arguments():
     parser.add_argument('-d', '--disable_pca', action='store_true', help='Do not use pca features, ony use additional features.')
     parser.add_argument('-c', '--contamination_plot', action='store_true', help='Show plot that shows SNR at different contamination levels.')
     parser.add_argument('-z', '--print_zap', action='store_true', help='Creates a plot that shows which profiles get zapped.')
+    parser.add_argument('-b', '--bandpass', action='store_true', help='Use bandpass correction.')
     parser.add_argument('-v', '--verbose', action='store_false', help='Reduces the verbosity of the program.')
     parser.add_argument('-o', '--output', type=str, default='',
-        help="Name of the output file. If set to 'std' the pattern NAME.FREQ.MJD.ar will be used.")
+        help='Name of the output file. If set to 'std' the pattern NAME.FREQ.MJD.ar will be used.')
+    parser.add_argument('-r', '--order', action='store_true', help='Use the computed features in the pca calculation.')
+    parser.add_argument('-w', '--weight', action='store_true', help='Do not use profiles which already have weight 0.')
     args = parser.parse_args()
     return args
 
@@ -68,17 +72,18 @@ def clean(ar, args, arch):
     """Cleans the archive and returns the cleaned copy.
     """
     ar_name = ar.get_filename().split()[-1]
-
     # Create copy of archive that is used to grab the profiles
-    patient = ar.clone()
-    patient.pscrunch()
-    patient.remove_baseline()
-    patient.dedisperse()
+    if args.bandpass:
+        patient = calibrate_bandpass(ar)
+    else:
+        patient = ar.clone()
+        patient.pscrunch()
+        patient.remove_baseline()
     # Grab the profiles after dedispersing them
+    patient.dedisperse()
     data = patient.get_data()[:, 0, :, :]
     profile_number = data[:, :, 0].size
     pca_components = min(args.components, data.shape[2])
-
 
     if args.verbose:
         print ("Number of Profiles: %s" % profile_number)
@@ -88,38 +93,31 @@ def clean(ar, args, arch):
 
     orig_shape = np.shape(data)
     # Reshape the profiles for pca computation
+
+
     data = np.reshape(data, (-1, orig_shape[2]))
 
-    # Compute the pca
-    pca = PCA(n_components=pca_components, svd_solver="full")
-    data_pca = pca.fit_transform(data)
+
+    # Delete 
+    if args.weight:
+        orig_weights = ar.get_weights().flatten()
+        known_rfi = np.where(orig_weights == 0)
+        known_non_rfi = np.where(orig_weights != 0)
+        data = np.delete(data, known_rfi, axis=0)
 
     # Compute additional features if wanted
-    array_feat = np.array([]).reshape(data.shape[0],0)
-    feat = []
     if args.features or args.disable_pca:
-        for parts in args.partition:
-            one_part_size = orig_shape[2] / float(parts)
-            for i in range(parts):
-                data_part = data[:, int(i * one_part_size):int((i + 1) * one_part_size)]
-                if 'std' in args.metrics:
-                    array_std = np.std(data_part, axis=1)
-                    feat.append(array_std)
-                if 'mean' in args.metrics:
-                    array_mean = np.mean(data_part, axis=1)
-                    feat.append(array_mean)
-                if 'ptp' in args.metrics:
-                    array_ptp = np.ptp(data_part, axis=1)
-                    feat.append(array_ptp)
-                if 'fft' in args.metrics:
-                    array_fft = np.max(np.abs(np.fft.rfft(data_part - np.expand_dims(np.mean(data_part, axis=1),axis=1), axis=1)),axis=1)
-                    feat.append(array_fft)
-        array_feat = np.asarray(feat).T
+        array_feat = compute_metrics(data)
 
+    if args.order:
+        data = np.concatenate((data, array_feat), axis =1)
 
+    # Compute the pca
     if not args.disable_pca:
+        pca = PCA(n_components=pca_components, svd_solver="full")
+        data_pca = pca.fit_transform(data)
         data_features = data_pca
-        if args.features:
+        if args.features and not args.order:
             data_features = np.concatenate((data_features, array_feat), axis =1)
     else:
         data_features = array_feat
@@ -133,7 +131,15 @@ def clean(ar, args, arch):
     clf.fit(data_features)
 
     anomaly_factors = clf.decision_function(data_features)
-    anomaly_factors_reshape = np.reshape(anomaly_factors, orig_shape[0:2])
+
+    # Introduce 
+    if args.weight:
+        dummy_anomaly = np.zeros(orig_weights.shape)
+        dummy_anomaly[known_non_rfi] = anomaly_factors
+        dummy_anomaly[known_rfi] = np.inf
+        anomaly_factors_reshape = np.reshape(dummy_anomaly, orig_shape[0:2])
+    else:
+        anomaly_factors_reshape = np.reshape(anomaly_factors, orig_shape[0:2])
 
     snrs = []
     split_values = []
@@ -146,7 +152,7 @@ def clean(ar, args, arch):
 
     for rfi_frac in np.linspace(min_frac, max_frac, num=num_frac):
         split_value = np.percentile(anomaly_factors, rfi_frac)
-        test_profile = np.sum(data[anomaly_factors >= split_value, :], axis=0)
+        test_profile = np.sum(data[anomaly_factors >= split_value, :orig_shape[2]], axis=0)
         profile_object = psrchive.Profile(orig_shape[2])
         profile_object.get_amps()[:] = test_profile
         test_snr = profile_object.snr()
@@ -196,6 +202,77 @@ def set_weights_archive(archive, anomaly_values, split_value):
     for (isub, ichan) in np.argwhere(anomaly_values < split_value):
         integ = archive.get_Integration(int(isub))
         integ.set_weight(int(ichan), 0.0)
+
+
+def calibrate_bandpass(ar):
+    # Calibrates the bandpass and grabs data. Based on:
+    # https://github.com/sosl/public_codes/blob/master/pulsar/bandpass/bandpass_correction.py
+    arch = ar.clone()
+    arch.pscrunch()
+    arch.tscrunch()
+    subint = arch.get_Integration(0)
+    (bl_mean, bl_var) = subint.baseline_stats()
+    bl_mean = bl_mean.squeeze()
+    bl_var = bl_var.squeeze()
+    non_zeroes = np.where(bl_mean != 0.0)
+    min_freq = arch.get_Profile(0, 0, 0).get_centre_frequency()
+    max_freq = arch.get_Profile(0, 0, ar.get_nchan()-1).get_centre_frequency()
+    smoothed = medfilt(bl_mean, 21)
+    # plt.plot(bl_mean)
+    # plt.plot(smoothed)
+    # plt.show()
+    # fig1 = plt.plot(freqs[non_zeroes],bl_mean[non_zeroes])
+    # xlab = plt.xlabel('frequency [MHz]')
+    # ylab = plt.ylabel('power [arbitrary]')
+    # plt.savefig(args.ar+"_bandpass.png")
+    # plt.clf()
+    arch = ar.clone()
+    arch.remove_baseline()
+    arch.pscrunch()
+    bl_mean_avg = np.average(bl_mean[non_zeroes])
+    for isub in range(arch.get_nsubint()):
+        for ipol in range(arch.get_npol()):
+            for ichan in range(arch.get_nchan()):
+                prof = arch.get_Profile(isub, ipol, ichan) 
+                if ichan in non_zeroes[0]:
+                    prof.scale(bl_mean_avg / smoothed[ichan])
+                # else:
+                #     prof.set_weight(0.0)
+    return arch
+
+
+def compute_metrics(data):
+    #  Compute the various metrics of the profiles
+    # array_feat = np.array([]).reshape(data.shape[0],0)
+    feat = []
+    for parts in args.partition:
+        one_part_size = data.shape[1] / float(parts)
+        for i in range(parts):
+            data_part = data[:, int(i * one_part_size):int((i + 1) * one_part_size)]
+            if 'std' in args.metrics:
+                array_std = np.log(np.std(data_part, axis=1))
+                feat.append(array_std)
+            if 'mean' in args.metrics:
+                # array_mean = np.log(np.abs(np.mean(data_part, axis=1)))
+                # array_mean = np.mean(data_part, axis=1)
+                array_mean = np.tanh(np.mean(data_part, axis=1))
+                feat.append(array_mean)
+            if 'ptp' in args.metrics:
+                array_ptp = np.log(np.ptp(data_part, axis=1))
+                feat.append(array_ptp)
+            if 'fft' in args.metrics:
+                array_fft = np.log(np.max(np.abs(np.fft.rfft(data_part - np.expand_dims(np.mean(data_part, axis=1),axis=1), axis=1)),axis=1))
+                feat.append(array_fft)
+            if 'med' in args.metrics:
+                array_med = np.max(np.abs(data_part - medfilt(data_part, kernel_size=(1,5))),axis=1)
+                feat.append(array_med)
+    array_feat = np.asarray(feat).T
+    # for i in range(array_feat.shape[1]):
+    #     plt.imshow(np.reshape(array_feat[:,i].T, orig_shape[0:2]), aspect='auto')
+    #     plt.colorbar()
+    #     plt.savefig("metric_%s.png"%i)
+    #     plt.close('all')
+    return array_feat
 
 
 if __name__=="__main__":
