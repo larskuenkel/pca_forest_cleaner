@@ -32,13 +32,13 @@ def parse_arguments():
                                                                 Multiple Values can be used. Default: 1.')
     parser.add_argument('-m', '--metrics', type=str, default=['std', 'fft', 'mean', 'ptp'], nargs='+', help='Choose which additional features are computed by -f.\
         Available: mean, fft, std, ptp.')
-    parser.add_argument('-a', '--additional', type=float, default=0.0, help='Remove up to x % profiles than at the point with highest SNR.\
+    parser.add_argument('-a', '--additional', type=float, default=0.0, help='Remove up to -a percent more profiles than at the point with highest SNR.\
                                 Will lower SNR but might remove RFI profiles.')
     parser.add_argument('-d', '--disable_pca', action='store_true', help='Do not use pca features, ony use additional features.')
     parser.add_argument('-c', '--contamination_plot', action='store_true', help='Show plot that shows SNR at different contamination levels.')
     parser.add_argument('-z', '--print_zap', action='store_true', help='Creates a plot that shows which profiles get zapped.')
     parser.add_argument('-b', '--bandpass', action='store_true', help='Use bandpass correction.')
-    parser.add_argument('-v', '--verbose', action='store_false', help='Reduces the verbosity of the program.')
+    parser.add_argument('-q', '--quiet', action='store_true', help='Reduces the verbosity of the program.')
     parser.add_argument('-o', '--output', type=str, default='',
         help="Name of the output file. If set to 'std' the pattern NAME.FREQ.MJD.ar will be used.")
     parser.add_argument('-r', '--order', action='store_true', help='Use the computed features in the pca calculation.')
@@ -49,7 +49,7 @@ def parse_arguments():
 
 def main(args):
     for arch in args.archive:
-        if args.verbose:
+        if not args.quiet:
             print ("Input archive: %s" % arch)
         ar = psrchive.Archive_load(arch)
         if args.output == '':
@@ -85,7 +85,7 @@ def clean(ar, args, arch):
     profile_number = data[:, :, 0].size
     pca_components = min(args.components, data.shape[2])
 
-    if args.verbose:
+    if not args.quiet:
         print ("Number of Profiles: %s" % profile_number)
         if not args.disable_pca:
             print ("PCA parameters: n_components: %s" % pca_components)
@@ -166,7 +166,7 @@ def clean(ar, args, arch):
     best_frac = rfi_fracs[best_index]
     best_split_value = split_values[best_index]
 
-    if args.verbose:
+    if not args.quiet:
         print ("Best SNR: %.1f RFI fraction: %.4f" % (best_snr, best_frac * 0.01))
 
 
