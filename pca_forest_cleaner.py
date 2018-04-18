@@ -82,6 +82,10 @@ def clean(ar, args, arch):
     # Grab the profiles after dedispersing them
     patient.dedisperse()
     data = patient.get_data()[:, 0, :, :]
+    if np.count_nonzero(data) == 0:
+        print("Archive is empty.")
+        return ar
+
     profile_number = data[:, :, 0].size
     pca_components = min(args.components, data.shape[2])
 
@@ -98,7 +102,7 @@ def clean(ar, args, arch):
     data = np.reshape(data, (-1, orig_shape[2]))
 
 
-    # Delete 
+    # Delete precleaned profiles
     if args.weight:
         orig_weights = ar.get_weights().flatten()
         known_rfi = np.where(orig_weights == 0)
