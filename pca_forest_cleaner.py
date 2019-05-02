@@ -53,6 +53,8 @@ def parse_arguments():
                         help='Use the computed features in the pca calculation.')
     parser.add_argument('-w', '--weight', action='store_true',
                         help='Do not use profiles which already have weight 0.')
+    parser.add_argument('--bad_chan', type=float, default=1, help='Fraction of subints that needs to be removed in order to remove the whole channel.')
+    parser.add_argument('--bad_subint', type=float, default=1, help='Fraction of channels that needs to be removed in order to remove the whole subint.')
     args = parser.parse_args()
     return args
 
@@ -191,6 +193,10 @@ def clean(ar, args, arch):
     # Set the weights in the archive
     set_weights_archive(ar, anomaly_factors_reshape, best_split_value)
 
+    # Test if whole channel or subints should be removed
+    if args.bad_chan != 1 or args.bad_subint != 1:
+        ar = find_bad_parts(ar, args)
+
     # Create plot that shows zapped( red) and unzapped( blue) profiles if needed
     if args.print_zap:
         plt.imshow(anomaly_factors_reshape.T, vmin=best_split_value - 0.0001, vmax=best_split_value, aspect='auto',
@@ -295,6 +301,36 @@ def compute_metrics(data):
     #     plt.savefig("metric_%s.png"%i)
     #     plt.close('all')
     return array_feat
+
+
+def find_bad_parts(archive, args):
+    """Checks whether whole channels or subints should be removed
+    """
+    weights = archive.get_weights()
+    n_subints = archive.get_nsubint()
+    n_channels = archive.get_nchan()
+    n_bad_channels = 0
+    n_bad_subints = 0
+
+    for i in range(n_subints):
+        bad_frac = 1 - np.count_nonzero(weights[i, :]) / float(n_channels)
+        if bad_frac > args.bad_subint:
+            for j in range(n_channels):
+                integ = archive.get_Integration(int(i))
+                integ.set_weight(int(j), 0.0)
+            n_bad_subints += 1
+
+    for j in range(n_channels):
+        bad_frac = 1 - np.count_nonzero(weights[:, j]) / float(n_subints)
+        if bad_frac > args.bad_chan:
+            for i in range(n_subints):
+                integ = archive.get_Integration(int(i))
+                integ.set_weight(int(j), 0.0)
+            n_bad_channels += 1
+
+    if not args.quiet and n_bad_channels + n_bad_subints != 0:
+        print("Removed %s bad subintegrations and %s bad channels." % (n_bad_subints, n_bad_channels))
+    return archive
 
 
 if __name__ == "__main__":
